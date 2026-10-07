@@ -17,6 +17,27 @@ if [ -f .env ]; then
   set +a
 fi
 
+# 数据目录：本机默认 data/，容器里由编排层覆盖为 /data/...
+# （STORAGE_ROOT / EXPORT_ROOT / BACKUP_ROOT 与应用 config.ts 的环境变量同名，
+# 相对路径按仓库根解析，保证本机直跑和容器内执行行为一致）
+_resolve_data_path() { # _resolve_data_path <env值> <默认相对路径>
+  local v="${1:-}" def="$2"
+  [ -n "$v" ] || v="$def"
+  case "$v" in
+    /*) printf '%s' "$v" ;;
+    *)
+      v="$ROOT_DIR/$v"
+      # 去掉 "./" 与重复斜杠，让日志和 tar 路径干净（无需 realpath，允许目标尚不存在）
+      v="${v//\/.\//\/}"
+      while [[ "$v" == *"//"* ]]; do v="${v//\/\//\/}"; done
+      printf '%s' "$v"
+      ;;
+  esac
+}
+UPLOADS_DIR="$(_resolve_data_path "${STORAGE_ROOT:-}" "data/uploads")"
+EXPORTS_DIR="$(_resolve_data_path "${EXPORT_ROOT:-}" "data/exports")"
+BACKUPS_DIR="$(_resolve_data_path "${BACKUP_ROOT:-}" "data/backups")"
+
 info() { printf '\033[1m[%s]\033[0m %s\n' "$(date +%H:%M:%S)" "$1"; }
 warn() { printf '\033[33m[warn]\033[0m %s\n' "$1"; }
 fail() { printf '\033[31m[fail]\033[0m %s\n' "$1" >&2; exit 1; }

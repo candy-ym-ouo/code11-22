@@ -1,0 +1,58 @@
+# 反向代理 + 前端静态托管
+# 容器内监听 8080（compose 映射到宿主机 HTTP_PORT，默认 8080）。
+# 上公网时：把站点地址 :8080 改成你的域名（如 heirloom.example.com）并映射 443，
+# Caddy 会自动申请并续期 Let's Encrypt 证书；同时在 deploy/.env.docker 里
+# 设置 APP_URL=https://你的域名、COOKIE_SECURE=true。
+{
+	admin off
+	auto_https off
+	servers {
+		trusted_proxies static private_ranges
+	}
+}
+
+:8080 {
+	encode zstd gzip
+
+	# 注意：这里用一组互斥的 handle 块显式控制顺序——
+	# 必须先把 /api 与健康检查反代出去，否则会被后面的 SPA 兜底吞掉。
+
+	# 1) API + 健康检查 → 反代 api:4000
+	@api path /api/* /healthz /readyz
+	handle @api {
+		reverse_proxy api:4000 {
+			header_up Host {host}
+			header_up X-Real-IP {remote_host}
+			# X-Forwarded-For / X-Forwarded-Proto 由 reverse_proxy 默认透传
+			# 音频拖动播放依赖流式响应，不要缓冲
+			flush_interval -1
+		}
+	}
+
+	# 2) 带 hash 指纹的静态资源：一年强缓存，找不到就 404（不回退 SPA）
+	handle /assets/* {
+		root * /srv/web
+		header Cache-Control "public, max-age=31536000, immutable"
+		try_files {path} =404
+		file_server
+	}
+
+	# 3) 其余路径走 SPA：命中文件就给文件，否则回退 index.html（不缓存）
+	handle {
+		root * /srv/web
+		try_files {path} /index.html
+		header Cache-Control "no-cache"
+		file_server
+	}
+
+	# 最大请求体需 ≥ MAX_AUDIO_MB（200MB）+ multipart 开销，
+	# 否则大音频在代理层就被拒（应用层上限见 .env 的 MAX_AUDIO_MB）
+	request_body {
+		max_size 210MB
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

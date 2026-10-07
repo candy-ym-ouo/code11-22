@@ -1,0 +1,171 @@
+# 家中物品来历册 · 一键编排
+#
+#   docker compose up -d --build   起整套：db → migrate → api → proxy
+#   docker compose ps              查看状态（健康检查）
+#
+# 所有持久数据都走命名卷（见文件末尾 volumes），镜像本身无状态，可随时销毁重建。
+# 可调参数见 deploy/.env.docker.example（复制为 deploy/.env.docker）。
+
+services:
+  # ---------- 数据库 ----------
+  db:
+    image: postgres:16-bookworm
+    container_name: heirloom-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-heirloom}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-please}
+      POSTGRES_DB: ${POSTGRES_DB:-heirloom}
+      TZ: ${TZ:-Asia/Shanghai}
+    # 不对宿主机暴露端口：只有内网网络里的 app/backup 能连，避免数据库误暴露
+    command:
+      - postgres
+      - -c
+      - listen_addresses=*
+      - -c
+      - max_connections=200
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      # 不经变量插值：postgres 超级用户本地连接必然可用（trust 本地 socket），
+      # 比 $$ 转义方式更少歧义，也顺带验证了 server 真正在接受连接
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # ---------- 应用：API + 托管前端（compose 内由 proxy 托管静态文件） ----------
+  api:
+    build:
+      context: .
+      target: app
+    image: heirloom-app:1.0.0
+    container_name: heirloom-api
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      TZ: ${TZ:-Asia/Shanghai}
+      APP_NAME: 家中物品来历册
+      APP_URL: ${APP_URL:-http://localhost:8080}
+      API_PORT: 4000
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # 指向 compose 网络内的 db 主机名；版本与 db 镜像同为 16
+      DATABASE_URL: postgresql://${POSTGRES_USER:-heirloom}:${POSTGRES_PASSWORD:-change-me-please}@db:5432/${POSTGRES_DB:-heirloom}?schema=public
+      # 留空时 entrypoint 自动生成并持久化到 secrets 卷（重启不变，会话不丢）
+      JWT_SECRET: ${JWT_SECRET:-}
+      ACCESS_TOKEN_TTL: ${ACCESS_TOKEN_TTL:-15m}
+      REFRESH_TOKEN_TTL: ${REFRESH_TOKEN_TTL:-14d}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      PUBLIC_SIGNUP: ${PUBLIC_SIGNUP:-false}
+      SERVE_WEB: "false"
+      STORAGE_ROOT: /data/uploads
+      EXPORT_ROOT: /data/exports
+      BACKUP_ROOT: /data/backups
+      FFMPEG_PATH: ffmpeg
+      FFPROBE_PATH: ffprobe
+      WORKER_ENABLED: ${WORKER_ENABLED:-true}
+      TRASH_RETENTION_DAYS: ${TRASH_RETENTION_DAYS:-30}
+      EXPORT_RETENTION_DAYS: ${EXPORT_RETENTION_DAYS:-7}
+      # 启动时自动执行 prisma migrate deploy；升级流程里也可手动关掉后单独迁移
+      MIGRATE_ON_START: ${MIGRATE_ON_START:-true}
+    volumes:
+      - uploads:/data/uploads
+      - exports:/data/exports
+      - backups:/data/backups
+      - secrets:/secrets
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - internal
+    healthcheck:
+      # /readyz 同时检查数据库、存储卷可写、worker 未卡死；Node 20 自带 fetch
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:4000/readyz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      # 首启要等迁移跑完
+      start_period: 60s
+
+  # ---------- 定时备份：每天一次全量 + 每周一次恢复演练 ----------
+  backup:
+    image: heirloom-app:1.0.0
+    # 该镜像由 api 服务的 build 产出；禁止 compose 尝试从仓库拉取同名镜像
+    pull_policy: never
+    container_name: heirloom-backup
+    restart: unless-stopped
+    # 复用同一镜像，切换为 cron 模式（不启动 API）
+    command: ["cron"]
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-heirloom}:${POSTGRES_PASSWORD:-change-me-please}@db:5432/${POSTGRES_DB:-heirloom}?schema=public
+      STORAGE_ROOT: /data/uploads
+      BACKUP_ROOT: /data/backups
+      DRILL_REPORT_ROOT: /data/backups/drill-reports
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-30}
+      BACKUP_HOUR: ${BACKUP_HOUR:-2}
+      BACKUP_MIN: ${BACKUP_MIN:-30}
+      # 周几在备份后追加一次恢复演练（Mon/Tue/.../Sun；置空可关闭）
+      DRILL_WEEKDAY: ${DRILL_WEEKDAY:-Sun}
+      BACKUP_ON_START: ${BACKUP_ON_START:-false}
+    volumes:
+      # backup 只读上传目录、写 backups；restore 模式会写 uploads（恢复备份）
+      - uploads:/data/uploads
+      - backups:/data/backups
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - internal
+    healthcheck:
+      # 调度循环每 60 秒刷新心跳；心跳超过 90 分钟没更新说明任务卡死
+      test: ["CMD-SHELL", "find /tmp -maxdepth 1 -name backup-scheduler.heartbeat -mmin -90 | grep -q ."]
+      interval: 5m
+      timeout: 5s
+      retries: 3
+      start_period: 2m
+
+  # ---------- 反向代理 + 前端静态托管 ----------
+  proxy:
+    build:
+      context: .
+      target: proxy
+    image: heirloom-proxy:1.0.0
+    container_name: heirloom-proxy
+    restart: unless-stopped
+    environment:
+      # 以非 root 运行；关闭 auto_https 后不写证书缓存，状态目录指到可写的 /tmp
+      XDG_CONFIG_HOME: /tmp/caddy
+      XDG_DATA_HOME: /tmp/caddy
+    ports:
+      # 默认 http://localhost:8080，可用 HTTP_PORT=80 ./deploy.sh up 改
+      - "${HTTP_PORT:-8080}:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  pgdata:    # PostgreSQL 数据目录
+  uploads:   # 图片/音频/文档原始文件与派生文件（sha256 内容寻址）
+  exports:   # 离线导出 ZIP
+  backups:   # 每日备份 + 恢复演练报告
+  secrets:   # 自动生成的 JWT_SECRET 等

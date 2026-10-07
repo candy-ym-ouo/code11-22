@@ -33,12 +33,18 @@ if ! pg_restore -d "$PG_URL" --clean --if-exists --no-owner --no-privileges < "$
   warn "pg_restore 返回非零退出码（通常是「对象不存在」之类的告警），继续校验"
 fi
 
-info "第 2 步：还原上传目录（当前目录改名为 .before-restore.<时间戳>）"
-if [ -d "$ROOT_DIR/data/uploads" ]; then
-  mv "$ROOT_DIR/data/uploads" "$ROOT_DIR/data/uploads.before-restore.$(date +%s)"
+UPLOADS_BASE="$(basename "$UPLOADS_DIR")"
+info "第 2 步：还原上传目录（当前目录改名为 ${UPLOADS_BASE}.before-restore.<时间戳>）"
+if [ -d "$UPLOADS_DIR" ]; then
+  mv "$UPLOADS_DIR" "$(dirname "$UPLOADS_DIR")/${UPLOADS_BASE}.before-restore.$(date +%s)"
 fi
-mkdir -p "$ROOT_DIR/data/uploads"
-tar -xzf "$DIR/uploads.tar.gz" -C "$ROOT_DIR/data"
+mkdir -p "$UPLOADS_DIR"
+# 包内顶层目录统一叫 uploads；当前存储目录基名若不同则做一层路径转换
+if [ "$UPLOADS_BASE" = "uploads" ]; then
+  tar -xzf "$DIR/uploads.tar.gz" -C "$(dirname "$UPLOADS_DIR")"
+else
+  tar -xzf "$DIR/uploads.tar.gz" --transform "s#^uploads#$UPLOADS_BASE#" -C "$(dirname "$UPLOADS_DIR")"
+fi
 
 info "第 3 步：校验（条数 + 媒体抽样 sha256）"
 if [ -f "$ROOT_DIR/apps/api/dist/scripts/verify-restore.js" ]; then
@@ -53,4 +59,4 @@ if curl -fsS "$HEALTH_URL" >/dev/null 2>&1; then
 else
   warn "API 当前没有运行，恢复完成后请重新启动：pnpm start"
 fi
-info "恢复完成。确认数据无误后可以删除 data/uploads.before-restore.* 释放空间。"
+info "恢复完成。确认数据无误后可以删除 $(dirname "$UPLOADS_DIR")/${UPLOADS_BASE}.before-restore.* 释放空间。"

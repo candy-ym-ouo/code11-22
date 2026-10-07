@@ -4,6 +4,8 @@ build/
 .env
 .env.*
 !.env.example
+# 编排密钥配置：deploy/.env.docker 不入库（含数据库密码/JWT），模板入库
+!deploy/.env.docker.example
 *.log
 coverage/
 .DS_Store

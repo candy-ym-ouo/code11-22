@@ -1,0 +1,24 @@
+# 构建上下文里不带本地数据/环境文件：镜像无状态，数据一律走挂载卷
+.git
+.gitignore
+.DS_Store
+.env
+.env.*
+!.env.example
+
+# 本地数据库集群、上传、备份、导出 —— 绝不能进镜像
+data/
+
+# 构建产物与依赖：镜像内重新安装/构建，避免宿主机二进制污染
+**/node_modules/
+**/dist/
+**/.vite/
+coverage/
+test-results/
+playwright-report/
+*.log
+
+# 容器编排与部署文件自身构建时不需要
+docker-compose*.yml
+docs/
+e2e/

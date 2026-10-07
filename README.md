@@ -173,6 +173,36 @@ pnpm backup:drill   # 还原到临时库并比对条数与媒体 sha256，输出
 
 ## 生产部署
 
+### 一键部署（Docker Compose，推荐）
+
+一条命令起整套：PostgreSQL 16 + API（启动自动迁移）+ 每日备份任务 + Caddy（反代并托管前端），数据全部走可恢复的命名卷：
+
+```bash
+cp deploy/.env.docker.example deploy/.env.docker   # 可选：改端口/密码/JWT_SECRET
+./deploy.sh up                # 构建镜像并后台启动
+./deploy.sh status            # 等四个服务都 healthy
+# 浏览器打开 http://localhost:8080，首个注册用户即系统管理员
+```
+
+```
+:8080 proxy(Caddy) ── 静态文件（apps/web/dist，assets 长缓存、SPA 回退）
+                 └── /api /healthz /readyz → api:4000 → db(postgres:16)
+backup 容器每天 02:30 全量备份（pg_dump + uploads.tar.gz + 清单 + DONE），
+每周日自动在临时库做恢复演练；备份与演练报告都在 backups 命名卷。
+```
+
+```bash
+./deploy.sh backup                    # 立即全量备份
+./deploy.sh list                      # 列出可用备份
+./deploy.sh drill                     # 立即恢复演练（还原临时库并比对）
+./deploy.sh restore 2026-10-07-023000 # 从备份恢复（自动停服、校验、拉起）
+./deploy.sh logs api                  # 看日志
+```
+
+完整说明（卷结构、整机恢复、上公网 HTTPS、升级流程）见 [`deploy/DEPLOYMENT.md`](deploy/DEPLOYMENT.md)。
+
+> 不想用容器？下面是直接在机器上跑的方式。
+
 整套应用就是一个 Node 进程：它同时提供 API、媒体流和前端静态文件。最小部署方式：
 
 ```bash

@@ -9,20 +9,20 @@ set -euo pipefail
 require_db
 
 DRILL_DB="heirloom_drill_$$"
-REPORT_DIR="$ROOT_DIR/docs"
+REPORT_DIR="${DRILL_REPORT_ROOT:-$ROOT_DIR/docs}"
 mkdir -p "$REPORT_DIR"
 REPORT="$REPORT_DIR/恢复演练报告-$(date +%Y%m%d-%H%M%S).md"
 DRILL_URL="$(pg_url_on "$DRILL_DB")"
 
 # 1. 取最新一份完整备份；没有就现做一份
 BACKUP_DIR=""
-for d in $(ls -1dt "$ROOT_DIR"/data/backups/*/ 2>/dev/null); do
+for d in $(ls -1dt "$BACKUPS_DIR"/*/ 2>/dev/null); do
   if [ -f "$d/DONE" ]; then BACKUP_DIR="$d"; break; fi
 done
 if [ -z "$BACKUP_DIR" ]; then
   info "没有可用备份，先执行一次备份"
   bash "$ROOT_DIR/scripts/backup.sh" >/dev/null
-  BACKUP_DIR="$(ls -1dt "$ROOT_DIR"/data/backups/*/ | head -1)"
+  BACKUP_DIR="$(ls -1dt "$BACKUPS_DIR"/*/ 2>/dev/null | head -1)"
 fi
 info "使用备份：$BACKUP_DIR"
 
@@ -48,7 +48,7 @@ DRILL_USERS="$(pg_query_on "$DRILL_DB" 'select count(*) from users')"
 
 # 4. 抽样校验媒体文件 sha256（库里的值与磁盘文件对得上）
 info "抽样校验媒体文件完整性"
-SAMPLE_FILE="$ROOT_DIR/data/.drill-sample"
+SAMPLE_FILE="${TMPDIR:-/tmp}/heirloom-drill-sample.$$"
 psql "$PG_URL" -tAc \
   "select id || '|' || sha256 || '|' || storage_key from item_media order by random() limit 10" > "$SAMPLE_FILE"
 CHECKED=0
@@ -57,7 +57,7 @@ MISSING=0
 DETAIL=""
 while IFS='|' read -r _mid sha key; do
   [ -n "${key:-}" ] || continue
-  file="$ROOT_DIR/data/uploads/$key"
+  file="$UPLOADS_DIR/$key"
   if [ ! -f "$file" ]; then
     MISSING=$((MISSING + 1))
     DETAIL="$DETAIL\n- 文件缺失：$key"
