@@ -1,0 +1,185 @@
+# 家中物品来历册 · 一键编排
+#
+# 依赖同目录 .env.docker（不存在时执行 bash deploy.sh init 自动生成）：
+#   POSTGRES_PASSWORD / POSTGRES_USER / POSTGRES_DB
+#   JWT_SECRET / APP_URL / COOKIE_SECURE / PUBLIC_SIGNUP
+#   TZ / BACKUP_TIME / BACKUP_RETENTION_DAYS / PUBLISHED_PORT
+#
+# 常用命令：
+#   bash deploy.sh init        生成 .env.docker（只做一次）
+#   bash deploy.sh up          构建 + 迁移 + 起服务
+#   bash deploy.sh down        停止（数据保留在卷与 ./data/backups）
+#   bash deploy.sh backup      立即备份一次
+#   bash deploy.sh restore     从最新备份恢复（可选参数：备份时间戳目录名）
+#   bash deploy.sh logs        跟踪日志
+
+name: heirloom
+
+services:
+  db:
+    image: postgres:16-bookworm
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # 默认不对宿主机暴露数据库端口，只能在 compose 网络内访问。
+    # 确需本机直连（psql / db:studio）时，在 .env.docker 设置 DB_PUBLISH_PORT=5432，
+    # deploy.sh up 会据此生成 docker-compose.override.yml 追加端口映射。
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  migrate:
+    build:
+      context: .
+      target: migrate
+    image: heirloom-migrate:local
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?schema=public
+    depends_on:
+      db:
+        condition: service_healthy
+    # 一次性任务：不重启；非零退出时 deploy.sh 会据此中止上线
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      target: api
+    image: heirloom-api:local
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    environment:
+      NODE_ENV: production
+      APP_NAME: 家中物品来历册
+      APP_URL: ${APP_URL:-http://localhost:4000}
+      API_PORT: "4000"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?schema=public
+      JWT_SECRET: ${JWT_SECRET}
+      ACCESS_TOKEN_TTL: 15m
+      REFRESH_TOKEN_TTL: 14d
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      # 静态前端由 nginx 托管，API 只出接口与媒体流
+      SERVE_WEB: "false"
+      STORAGE_ROOT: /data/uploads
+      EXPORT_ROOT: /data/exports
+      BACKUP_ROOT: /data/backups
+      MAX_IMAGE_MB: ${MAX_IMAGE_MB:-25}
+      MAX_AUDIO_MB: ${MAX_AUDIO_MB:-200}
+      MAX_DOC_MB: ${MAX_DOC_MB:-50}
+      FFMPEG_PATH: ffmpeg
+      FFPROBE_PATH: ffprobe
+      WORKER_ENABLED: "true"
+      WORKER_POLL_MS: "2000"
+      TRASH_RETENTION_DAYS: ${TRASH_RETENTION_DAYS:-30}
+      EXPORT_RETENTION_DAYS: ${EXPORT_RETENTION_DAYS:-7}
+      PUBLIC_SIGNUP: ${PUBLIC_SIGNUP:-false}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - uploads:/data/uploads
+      - exports:/data/exports
+      - ./data/backups:/data/backups
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('node:http').get('http://127.0.0.1:4000/readyz',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  web:
+    build:
+      context: .
+      target: web
+    image: heirloom-web:local
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    ports:
+      - "${PUBLISHED_PORT:-4000}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      # 经 nginx 反代打到 api：前端服务与 API 同时就绪才算就绪
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1/healthz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  backup:
+    build:
+      context: .
+      target: backup
+    image: heirloom-backup:local
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    environment:
+      PGHOST: db
+      PGPORT: "5432"
+      PGUSER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB}
+      UPLOADS_DIR: /uploads
+      BACKUP_DIR: /backups
+      BACKUP_TIME: ${BACKUP_TIME:-02:30}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - uploads:/uploads:ro
+      - ./data/backups:/backups
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # 一次性恢复任务（默认不随 up 启动，由 deploy.sh restore 调起）
+  restore:
+    profiles: ["restore"]
+    image: heirloom-backup:local
+    environment:
+      PGHOST: db
+      PGPORT: "5432"
+      PGUSER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB}
+      UPLOADS_DIR: /uploads
+      BACKUP_DIR: /backups
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - uploads:/uploads
+      - ./data/backups:/backups:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    entrypoint: ["/usr/local/bin/container-restore.sh"]
+
+volumes:
+  pgdata:
+    name: heirloom_pgdata
+  uploads:
+    name: heirloom_uploads
+  exports:
+    name: heirloom_exports
+# 说明：备份目录刻意使用宿主机 bind mount（./data/backups），不进命名卷——
+# 备份的意义在于能离开本机，bind 目录可直接 rsync / 复制到异地。

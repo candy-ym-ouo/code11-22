@@ -4,6 +4,7 @@ build/
 .env
 .env.*
 !.env.example
+!.env.docker.example
 *.log
 coverage/
 .DS_Store
@@ -11,3 +12,7 @@ data/
 .vite/
 test-results/
 playwright-report/
+
+# 容器编排运行时产物
+.env.docker
+docker-compose.override.yml

@@ -1,0 +1,27 @@
+# 容器构建只需要源码与锁文件；以下内容在镜像内重新生成或根本用不到。
+**/node_modules
+**/dist
+**/.vite
+**/coverage
+**/test-results
+**/playwright-report
+
+# 本地数据与本地运行时（含 pg.sh 起的本机数据库，绝不能进构建上下文）
+data/
+*.log
+
+# 本地环境配置（容器用 .env.docker，由 deploy.sh 生成）
+.env
+.env.*
+!.env.docker.example
+
+# 容器交付物自身无需重复进入构建上下文
+.dockerignore
+docker-compose.yml
+
+# 杂项
+.git
+.gitignore
+.DS_Store
+docs/screenshots/
+e2e/

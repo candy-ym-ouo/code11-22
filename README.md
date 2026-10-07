@@ -173,6 +173,25 @@ pnpm backup:drill   # 还原到临时库并比对条数与媒体 sha256，输出
 
 ## 生产部署
 
+### 方式一：Docker 一键编排（推荐）
+
+不依赖宿主机的 Node / PostgreSQL / ffmpeg，只需 Docker Engine 24+ 与 Compose v2：
+
+```bash
+bash deploy.sh init     # 生成 .env.docker（随机数据库密码 + JWT 密钥）
+bash deploy.sh up       # 构建镜像 → 数据库迁移 → 启动 API / nginx / 定时备份 → 就绪检查
+```
+
+- 反向代理 + 前端静态托管：内置 nginx 容器（`/api`、`/healthz`、`/readyz` 反代，其余走容器内静态产物）
+- 迁移：一次性 `migrate` 容器跑 `prisma migrate deploy`，成功后 API 才启动
+- 健康检查：db 用 `pg_isready`，API 用 `/readyz`（DB/存储/worker），nginx 经反代链路探活
+- 定时备份：`backup` 容器每日生成 `db.dump + uploads.tar.gz + manifest.json + DONE` 到 `./data/backups`，`bash deploy.sh restore` 一键回滚
+- 数据卷：`heirloom_pgdata` / `heirloom_uploads` / `heirloom_exports` 命名卷持久化，容器重建不丢数据
+
+完整拓扑、恢复演练与灾难重建步骤见 [docs/deploy-docker.md](docs/deploy-docker.md)。
+
+### 方式二：裸机单进程
+
 整套应用就是一个 Node 进程：它同时提供 API、媒体流和前端静态文件。最小部署方式：
 
 ```bash
